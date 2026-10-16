@@ -19,6 +19,7 @@
 
 #define F_CPU 16000000UL
 
+#include <avr/interrupt.h>
 #include <avr/io.h>
 #include <stdint.h>
 
@@ -57,6 +58,12 @@ static uint8_t clamp_u8(int32_t v, int32_t low, int32_t high);
 
 static int32_t pid_integral;
 static int16_t pid_previous_error;
+static volatile uint8_t loop_flag;
+
+ISR(TIMER0_COMPA_vect)
+{
+    loop_flag = 1;
+}
 
 static uint16_t
 adc_read_raw(uint8_t channel)
@@ -120,9 +127,14 @@ main(void)
 	ADCSRA |= (1 << ADSC);
 	while (ADCSRA & (1 << ADSC));
 
-	/* PWM init */
+	/* Timer0 init for 2 ms fixed loop tick */
+	TCCR0A = (1 << WGM01);                  
+	TCCR0B = (1 << CS02);                   
+	OCR0A = 124;                            
+	TIMSK0 = (1 << OCIE0A);                 
+	sei();                                  
 
-	/* Timer2 */
+	/* Timer2, used for motor speeds */
 	TCCR2A = (1 << COM2A1) | (1 << COM2B1) | (1 << WGM21) | (1 << WGM20);
 	TCCR2B = (1 << CS22);                             /* /64 -> ~976 Hz */
 	OCR2A = 0;
@@ -136,7 +148,11 @@ main(void)
 	DDRD |= (1 << LEFT_DIRECTION_A) | (1 << LEFT_DIRECTION_B) |
 		(1 << RIGHT_DIRECTION_A) | (1 << RIGHT_DIRECTION_B);
 
-	for (state = STATE_LINE_FOLLOW;;) {
+	for (state = STATE_LINE_FOLLOW, loop_flag = 0;;) {
+
+		while (!loop_flag);
+		loop_flag = 0;
+
 		left_sensor = adc_read(SENSOR_LEFT);
 		right_sensor = adc_read(SENSOR_RIGHT);
 
