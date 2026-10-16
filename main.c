@@ -31,29 +31,35 @@
 #define RIGHT_DIRECTION_A	PD5
 #define RIGHT_DIRECTION_B	PD6
 
-#define SENSOR_LEFT	0       /* PC0/ADC0 */
-#define SENSOR_RIGHT	1       /* PC1/ADC1 */
+#define SENSOR_LEFT		0       /* PC0/ADC0 */
+#define SENSOR_RIGHT		1       /* PC1/ADC1 */
+
+#define BLACK_THRESHOLD		500
+#define CALIBRATION_DURATION	2500 /* Measured in ticks of 2ms; 2ms * 2500 = 5s */
+#define CALIBRATION_SPEED	200
 
 #define BASE_SPEED      	125
 #define SHARP_TURN_SPEED 	200
 #define MAX_DUTY        	245
 #define MIN_DUTY        	0
 
-#define BRAKE_DURATION		10 /* Measured in ticks of 2ms; 2ms * 5 = 10ms */
-#define SHARP_CURVE_THRESHOLD 	250
+#define BRAKE_DURATION		10 /* Measured in ticks of 2ms; 2ms * 10 = 20ms */
+#define TURN_DURATION 		20 /* Measured in ticks of 2ms; 2ms * 20 = 40ms */
+#define SHARP_CURVE_THRESHOLD 	700
 
-#define KP              500
+#define KP              150
 #define KI              0
-#define KD              100
+#define KD              40
 #define INTEGRAL_CLAMP  10000
 
 enum finite_state_machine {
 	STATE_FOLLOWING_LINE,
 	STATE_STARTING_SHARP_CURVE_LEFT,
 	STATE_BRAKE_DELAY_BEFORE_LEFT,
+	STATE_DOING_SHARP_CURVE_LEFT,
 	STATE_STARTING_SHARP_CURVE_RIGHT,
 	STATE_BRAKE_DELAY_BEFORE_RIGHT,
-	STATE_DOING_SHARP_CURVE
+	STATE_DOING_SHARP_CURVE_RIGHT
 };
 
 static uint16_t adc_read_raw(uint8_t channel);
@@ -63,11 +69,13 @@ static uint8_t clamp_u8(int32_t v, int32_t low, int32_t high);
 
 static int32_t pid_integral;
 static int16_t pid_previous_error;
-static volatile uint8_t loop_flag;
+static uint16_t calibration_min[2];
+static uint16_t calibration_max[2];
+static volatile uint8_t tick_flag;
 
 ISR(TIMER0_COMPA_vect)
 {
-    loop_flag = 1;
+	tick_flag = 1;
 }
 
 static uint16_t
@@ -116,14 +124,30 @@ clamp_u8(int32_t v, int32_t low, int32_t high)
 	return (uint8_t)v;
 }
 
+static uint16_t
+normalize(uint16_t raw, uint8_t sensor)
+{
+	int32_t v;
+
+	v = (((int32_t)raw - (int32_t)calibration_min[sensor]) * 1000) /
+		((int32_t)calibration_max[sensor] - (int32_t)calibration_min[sensor]);
+
+	if (v < 0)
+		v = 0;
+	if (v > 1000)
+		v = 1000;
+
+	return (uint16_t)v;
+}
+
 int
 main(void)
 {
 	enum finite_state_machine state;
 	int32_t left_speed, right_speed;
 	uint16_t left_sensor, right_sensor;
-	int16_t correction, error;
-	uint8_t brake_counter;
+	int16_t correction, calibration_counter, error;
+	uint8_t brake_counter, turn_counter;
 
 	/* ADC init */
 	ADMUX  = (1 << REFS0);
@@ -154,29 +178,63 @@ main(void)
 	DDRD |= (1 << LEFT_DIRECTION_A) | (1 << LEFT_DIRECTION_B) |
 		(1 << RIGHT_DIRECTION_A) | (1 << RIGHT_DIRECTION_B);
 
-	for (brake_counter = 0, loop_flag = 0, state = STATE_FOLLOWING_LINE;;) {
-		while (!loop_flag);
-		loop_flag = 0;
+	/* Calibrating sensors */
+
+	/* Turn counter-clockwise */
+	PORTD |=  (1 << LEFT_DIRECTION_B) | (1 << RIGHT_DIRECTION_A);
+	PORTD &= ~((1 << LEFT_DIRECTION_A)  | (1 << RIGHT_DIRECTION_B));
+
+	OCR2B = CALIBRATION_SPEED;
+	OCR2A = CALIBRATION_SPEED;
+
+	calibration_min[0] = 1023;
+	calibration_min[1] = 1023;
+	calibration_max[0] = 0;
+	calibration_max[1] = 0;
+
+	for (tick_flag = 0, calibration_counter = CALIBRATION_DURATION; calibration_counter > 0; calibration_counter--) {
+		while (!tick_flag);
+		tick_flag = 0;
 
 		left_sensor = adc_read(SENSOR_LEFT);
 		right_sensor = adc_read(SENSOR_RIGHT);
+
+		if (left_sensor < calibration_min[0])
+			calibration_min[0] = left_sensor;
+		if (left_sensor > calibration_max[0])
+			calibration_max[0] = left_sensor;
+		if (right_sensor < calibration_min[1])
+			calibration_min[1] = right_sensor;
+		if (right_sensor > calibration_max[1])
+			calibration_max[1] = right_sensor;
+	}
+
+	if (calibration_max[0] - calibration_min[0] < 200)
+		calibration_max[0] = calibration_min[0] + 200;
+	if (calibration_max[1] - calibration_min[1] < 200)
+		calibration_max[1] = calibration_min[1] + 200;
+
+	/* Main loop */
+	for (brake_counter = 0, tick_flag = 0, turn_counter = 0, state = STATE_FOLLOWING_LINE;;) {
+		while (!tick_flag);
+		tick_flag = 0;
+
+		left_sensor = normalize(adc_read(SENSOR_LEFT), 0);
+		right_sensor = normalize(adc_read(SENSOR_RIGHT), 1);
 
 		error = (int16_t)right_sensor - (int16_t)left_sensor;
 
 		switch (state) {
 		case STATE_FOLLOWING_LINE:
-			if (error > SHARP_CURVE_THRESHOLD) {
-				state = STATE_STARTING_SHARP_CURVE_RIGHT;
-				pid_integral = 0;
-				pid_previous_error = 0;
-				break;
-            		}
 			if (error < -SHARP_CURVE_THRESHOLD) {
 				state = STATE_STARTING_SHARP_CURVE_LEFT;
-				pid_integral = 0;
-				pid_previous_error = 0;
 				break;
             		}
+			if (error > SHARP_CURVE_THRESHOLD) {
+				state = STATE_STARTING_SHARP_CURVE_RIGHT;
+				break;
+            		}
+
 			correction = pid(error);
 
 			left_speed = (int32_t)BASE_SPEED + correction;
@@ -189,32 +247,11 @@ main(void)
 			OCR2B = clamp_u8(left_speed, MIN_DUTY, MAX_DUTY);
 			OCR2A = clamp_u8(right_speed, MIN_DUTY, MAX_DUTY);
 			break;
-		case STATE_STARTING_SHARP_CURVE_RIGHT:
-			state = STATE_BRAKE_DELAY_BEFORE_RIGHT;
-
-			/* Brake */
-			PORTD |=  (1 << LEFT_DIRECTION_A) | (1 << RIGHT_DIRECTION_A) |
-				  (1 << LEFT_DIRECTION_B) | (1 << RIGHT_DIRECTION_B);
-
-			OCR2A = 0;
-			OCR2B = 0;
-
-			brake_counter = BRAKE_DURATION;
-			break;
-		case STATE_BRAKE_DELAY_BEFORE_RIGHT:
-			if (--brake_counter == 0) {
-				state = STATE_DOING_SHARP_CURVE;
-
-				/* Turn right */
-				PORTD |=  (1 << LEFT_DIRECTION_A) | (1 << RIGHT_DIRECTION_B);
-				PORTD &= ~((1 << LEFT_DIRECTION_B)  | (1 << RIGHT_DIRECTION_A));
-
-				OCR2A = SHARP_TURN_SPEED;
-				OCR2B = SHARP_TURN_SPEED;
-			}
-			break;
 		case STATE_STARTING_SHARP_CURVE_LEFT:
 			state = STATE_BRAKE_DELAY_BEFORE_LEFT;
+
+			pid_integral = 0;
+			pid_previous_error = 0;
 
 			/* Brake */
 			PORTD |=  (1 << LEFT_DIRECTION_A) | (1 << RIGHT_DIRECTION_A) |
@@ -227,7 +264,7 @@ main(void)
 			break;
 		case STATE_BRAKE_DELAY_BEFORE_LEFT:
 			if (--brake_counter == 0) {
-				state = STATE_DOING_SHARP_CURVE;
+				state = STATE_DOING_SHARP_CURVE_LEFT;
 
 				/* Turn left */
 				PORTD |=  (1 << LEFT_DIRECTION_B) | (1 << RIGHT_DIRECTION_A);
@@ -235,14 +272,61 @@ main(void)
 
 				OCR2A = SHARP_TURN_SPEED;
 				OCR2B = SHARP_TURN_SPEED;
+
+				turn_counter = TURN_DURATION;
 			}
 			break;
-		case STATE_DOING_SHARP_CURVE:
-			if (error > -SHARP_CURVE_THRESHOLD && error < SHARP_CURVE_THRESHOLD) {
-				state = STATE_FOLLOWING_LINE;
-				pid_integral = 0;
-				pid_previous_error = 0;
-				break;
+		case STATE_DOING_SHARP_CURVE_LEFT:
+			if (turn_counter > 0) {
+				turn_counter--;
+			} else {
+				if (right_sensor > BLACK_THRESHOLD) {
+					state = STATE_FOLLOWING_LINE;
+					pid_integral = 0;
+					pid_previous_error = 0;
+					break;
+				}
+			}
+			break;
+		case STATE_STARTING_SHARP_CURVE_RIGHT:
+			state = STATE_BRAKE_DELAY_BEFORE_RIGHT;
+
+			pid_integral = 0;
+			pid_previous_error = 0;
+
+			/* Brake */
+			PORTD |=  (1 << LEFT_DIRECTION_A) | (1 << RIGHT_DIRECTION_A) |
+				  (1 << LEFT_DIRECTION_B) | (1 << RIGHT_DIRECTION_B);
+
+			OCR2A = 0;
+			OCR2B = 0;
+
+			brake_counter = BRAKE_DURATION;
+			break;
+		case STATE_BRAKE_DELAY_BEFORE_RIGHT:
+			if (--brake_counter == 0) {
+				state = STATE_DOING_SHARP_CURVE_RIGHT;
+
+				/* Turn right */
+				PORTD |=  (1 << LEFT_DIRECTION_A) | (1 << RIGHT_DIRECTION_B);
+				PORTD &= ~((1 << LEFT_DIRECTION_B)  | (1 << RIGHT_DIRECTION_A));
+
+				OCR2A = SHARP_TURN_SPEED;
+				OCR2B = SHARP_TURN_SPEED;
+				
+				turn_counter = TURN_DURATION;
+			}
+			break;
+		case STATE_DOING_SHARP_CURVE_RIGHT:
+			if (turn_counter > 0) {
+				turn_counter--;
+			} else {
+				if (left_sensor > BLACK_THRESHOLD) {
+					state = STATE_FOLLOWING_LINE;
+					pid_integral = 0;
+					pid_previous_error = 0;
+					break;
+				}
 			}
 			break;
 		}
