@@ -37,19 +37,20 @@
 #define CALIBRATION_DURATION	1500 /* Measured in ticks of 2ms; 2ms * 1500 = 3s */
 #define CALIBRATION_SPEED	200
 
-#define BASE_SPEED      	120
-#define SHARP_TURN_SPEED 	140
+#define BASE_SPEED      	125
+#define SHARP_TURN_SPEED 	200
 #define MAX_DUTY        	245
 #define MIN_DUTY        	0
 
-#define WHITE_THRESHOLD			150
 #define BLACK_THRESHOLD			800
-#define CENTER_THRESHOLD		150
-#define SHARP_CURVE_THRESHOLD		600
+#define WHITE_THRESHOLD			150
+#define SHARP_CURVE_THRESHOLD		700
+#define CENTER_THRESHOLD		500
+#define TURN_DELAY_DURATION		50 /* Measured in ticks of 2ms; 2ms * 50 = 100ms */
 
-#define KP              100
-#define KI              2
-#define KD             	20
+#define KP              50
+#define KI              0
+#define KD              12
 #define INTEGRAL_CLAMP  5000
 
 #define CLAMP(v, low, high)  ((v) < (low) ? (low) : ((v) > (high) ? (high) : (v)))
@@ -153,8 +154,8 @@ main(void)
 {
 	enum finite_state_machine state;
 	int32_t left_speed, right_speed;
-	uint16_t left_sensor, right_sensor;
-	int16_t correction, calibration_counter, error;
+	uint16_t left_sensor, right_sensor, turn_delay_counter;
+	int16_t correction, calibration_counter, error, last_error;
 
 	/* ADC init */
 	ADMUX  = (1 << REFS0);
@@ -229,12 +230,18 @@ main(void)
 		left_sensor = normalize(adc_read(SENSOR_LEFT), 0);
 		right_sensor = normalize(adc_read(SENSOR_RIGHT), 1);
 
-		error = right_sensor - left_sensor;
+		error = (int16_t)right_sensor - left_sensor;
 
 		switch (state) {
 		case STATE_FOLLOWING_LINE:
+			/* Go forward */
+			PORTD |=  (1 << LEFT_DIRECTION_A) | (1 << RIGHT_DIRECTION_A);
+			PORTD &= ~((1 << LEFT_DIRECTION_B)  | (1 << RIGHT_DIRECTION_B));
+
 			if (error < -SHARP_CURVE_THRESHOLD || error > SHARP_CURVE_THRESHOLD || (left_sensor > BLACK_THRESHOLD && right_sensor > BLACK_THRESHOLD)) {
 				state = STATE_STARTING_SHARP_CURVE;
+				turn_delay_counter = TURN_DELAY_DURATION;
+				last_error = error;
 				break;
 			}
 
@@ -243,19 +250,18 @@ main(void)
 			left_speed = (int32_t)BASE_SPEED + correction;
 			right_speed = (int32_t)BASE_SPEED - correction;
 
-			/* Go forward */
-			PORTD |=  (1 << LEFT_DIRECTION_A) | (1 << RIGHT_DIRECTION_A);
-			PORTD &= ~((1 << LEFT_DIRECTION_B)  | (1 << RIGHT_DIRECTION_B));
-
 			OCR2B = CLAMP(left_speed, MIN_DUTY, MAX_DUTY);
 			OCR2A = CLAMP(right_speed, MIN_DUTY, MAX_DUTY);
 			break;
 		case STATE_STARTING_SHARP_CURVE:
+			if (turn_delay_counter > 0) {
+				turn_delay_counter--;
+			} else {
 				state = STATE_DOING_SHARP_CURVE;
 				pid_integral = 0;
 				pid_previous_error = 0;
 
-				if (error < -SHARP_CURVE_THRESHOLD) {
+				if (last_error < -SHARP_CURVE_THRESHOLD) {
 					/* Turn left */
 					PORTD |=  (1 << LEFT_DIRECTION_B) | (1 << RIGHT_DIRECTION_A);
 					PORTD &= ~((1 << LEFT_DIRECTION_A)  | (1 << RIGHT_DIRECTION_B));
@@ -267,12 +273,21 @@ main(void)
 
 				OCR2A = SHARP_TURN_SPEED;
 				OCR2B = SHARP_TURN_SPEED;
+			}
 			break;
 		case STATE_DOING_SHARP_CURVE:
-			if (error > -CENTER_THRESHOLD && error < CENTER_THRESHOLD && !(left_sensor > BLACK_THRESHOLD && right_sensor > BLACK_THRESHOLD)) {
-				state = STATE_FOLLOWING_LINE;
-				pid_integral = 0;
-				pid_previous_error = 0;
+			if (last_error < -SHARP_CURVE_THRESHOLD) {
+				if (error > -CENTER_THRESHOLD && error < CENTER_THRESHOLD && right_sensor > WHITE_THRESHOLD) {
+					state = STATE_FOLLOWING_LINE;
+					pid_integral = 0;
+					pid_previous_error = 0;
+				}
+			} else {
+				if (error > -CENTER_THRESHOLD && error < CENTER_THRESHOLD && left_sensor > WHITE_THRESHOLD) {
+					state = STATE_FOLLOWING_LINE;
+					pid_integral = 0;
+					pid_previous_error = 0;
+				}
 			}
 			break;
 		}
