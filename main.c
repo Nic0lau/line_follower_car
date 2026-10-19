@@ -35,9 +35,9 @@
 #define SENSOR_RIGHT		1       /* PC1/ADC1 */
 
 #define CALIBRATION_DURATION	1500 /* Measured in ticks of 2ms; 2ms * 1500 = 3s */
-#define CALIBRATION_SPEED	200
+#define CALIBRATION_SPEED	245
 
-#define BASE_SPEED      	125
+#define BASE_SPEED      	140
 #define SHARP_TURN_SPEED 	200
 #define MAX_DUTY        	245
 #define MIN_DUTY        	0
@@ -45,10 +45,10 @@
 #define BLACK_THRESHOLD			800
 #define WHITE_THRESHOLD			150
 #define SHARP_CURVE_THRESHOLD		700
-#define CENTER_THRESHOLD		500
+#define CENTER_THRESHOLD		200
 #define TURN_DELAY_DURATION		50 /* Measured in ticks of 2ms; 2ms * 50 = 100ms */
 
-#define KP              50
+#define KP              45
 #define KI              0
 #define KD              12
 #define INTEGRAL_CLAMP  5000
@@ -156,6 +156,7 @@ main(void)
 	int32_t left_speed, right_speed;
 	uint16_t left_sensor, right_sensor, turn_delay_counter;
 	int16_t correction, calibration_counter, error, last_error;
+	uint8_t line_seem;
 
 	/* ADC init */
 	ADMUX  = (1 << REFS0);
@@ -260,6 +261,7 @@ main(void)
 				state = STATE_DOING_SHARP_CURVE;
 				pid_integral = 0;
 				pid_previous_error = 0;
+				line_seem = 0;
 
 				if (last_error < -SHARP_CURVE_THRESHOLD) {
 					/* Turn left */
@@ -276,19 +278,14 @@ main(void)
 			}
 			break;
 		case STATE_DOING_SHARP_CURVE:
-			if (last_error < -SHARP_CURVE_THRESHOLD) {
-				if (error > -CENTER_THRESHOLD && error < CENTER_THRESHOLD && right_sensor > WHITE_THRESHOLD) {
-					state = STATE_FOLLOWING_LINE;
-					pid_integral = 0;
-					pid_previous_error = 0;
-				}
-			} else {
-				if (error > -CENTER_THRESHOLD && error < CENTER_THRESHOLD && left_sensor > WHITE_THRESHOLD) {
-					state = STATE_FOLLOWING_LINE;
-					pid_integral = 0;
-					pid_previous_error = 0;
-				}
+			if (left_sensor > BLACK_THRESHOLD || right_sensor > BLACK_THRESHOLD)
+				line_seem = 1;
+			if (error > -CENTER_THRESHOLD && error < CENTER_THRESHOLD && line_seem) {
+				state = STATE_FOLLOWING_LINE;
+				pid_integral = 0;
+				pid_previous_error = 0;
 			}
+
 			break;
 		}
 	}
