@@ -35,22 +35,22 @@
 #define SENSOR_RIGHT		1       /* PC1/ADC1 */
 
 #define CALIBRATION_DURATION	1500 /* Measured in ticks of 2ms; 2ms * 1500 = 3s */
-#define CALIBRATION_SPEED	245
+#define CALIBRATION_SPEED	200
 
-#define BASE_SPEED      	140
-#define SHARP_TURN_SPEED 	200
+#define BASE_SPEED      	200
+#define SHARP_TURN_SPEED 	225
 #define MAX_DUTY        	245
 #define MIN_DUTY        	0
 
 #define BLACK_THRESHOLD			800
 #define WHITE_THRESHOLD			150
-#define SHARP_CURVE_THRESHOLD		700
-#define CENTER_THRESHOLD		200
+#define SHARP_CURVE_THRESHOLD		20000 /* Currently disabled */
+#define CENTER_THRESHOLD		10
 #define TURN_DELAY_DURATION		50 /* Measured in ticks of 2ms; 2ms * 50 = 100ms */
 
-#define KP              45
-#define KI              0
-#define KD              12
+#define KP             	750
+#define KI              20
+#define KD             	50
 #define INTEGRAL_CLAMP  5000
 
 #define CLAMP(v, low, high)  ((v) < (low) ? (low) : ((v) > (high) ? (high) : (v)))
@@ -242,7 +242,8 @@ main(void)
 			if (error < -SHARP_CURVE_THRESHOLD || error > SHARP_CURVE_THRESHOLD || (left_sensor > BLACK_THRESHOLD && right_sensor > BLACK_THRESHOLD)) {
 				state = STATE_STARTING_SHARP_CURVE;
 				turn_delay_counter = TURN_DELAY_DURATION;
-				last_error = error;
+				last_error = (error > -SHARP_CURVE_THRESHOLD && error < SHARP_CURVE_THRESHOLD) ?
+					     ((left_sensor > right_sensor) ? -SHARP_CURVE_THRESHOLD : SHARP_CURVE_THRESHOLD) : error;
 				break;
 			}
 
@@ -285,7 +286,6 @@ main(void)
 				pid_integral = 0;
 				pid_previous_error = 0;
 			}
-
 			break;
 		}
 	}
